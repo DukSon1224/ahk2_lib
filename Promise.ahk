@@ -1,58 +1,56 @@
 /************************************************************************
  * @description Implements a javascript-like Promise
  * @author thqby
- * @date 2023/06/19
- * @version 1.0.2
- * @requires AutoHotkey-v2.0.3+	The lower version ahk uses version 1.0.1.
+ * @date 2024/09/29
+ * @version 1.0.7
  ***********************************************************************/
 
-; Represents the completion of an asynchronous operation
+/**
+ * Represents the completion of an asynchronous operation
+ * @see {@link https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise MDN doc}
+ * @alias Promise<T=Any>
+ */
 class Promise {
+	static Prototype.status := 'pending'
+	/** @type {T} */
+	static Prototype.value := ''
+	static Prototype.reason := ''
+	static Prototype.handled := false
+
 	/**
-	 * @param {(resolve,reject)=>void} executor A callback used to initialize the promise. This callback is passed two arguments:
+	 * @param {(resolve [,reject])=>void} executor A callback used to initialize the promise. This callback is passed two arguments:
 	 * a resolve callback used to resolve the promise with a value or the result of another promise,
 	 * and a reject callback used to reject the promise with a provided reason or error.
 	 * - resolve(data) => void
 	 * - reject(err) => void
-	 * @returns {Promise} Creates a new Promise.
 	 */
 	__New(executor) {
 		; this.DefineProp('__Delete', { call: this => OutputDebug('del: ' ObjPtr(this) '`n') })
-		this.status := 'pending'
-		this.value := ''
-		this.reason := ''
-		this.onResolvedCallbacks := []
-		this.onRejectedCallbacks := []
+		this.callbacks := []
 		try
 			(executor.MaxParams = 1) ? executor(resolve) : executor(resolve, reject)
 		catch Any as e
 			reject(e)
-		resolve(value) {
+		resolve(value := '') {
 			if value is Promise
 				return value.then(resolve, reject)
-			if (this.status != 'pending')
+			if ObjHasOwnProp(this, 'status')
 				return
-			this.value := value
 			this.status := 'fulfilled'
-			handle(this, 'onRejectedCallbacks')
-			handle(this, 'onResolvedCallbacks', value)
+			SetTimer(task.Bind(this, this.value := value), this := -1)
 		}
-		reject(reason) {
-			if (this.status != 'pending')
+		reject(reason?) {
+			if ObjHasOwnProp(this, 'status')
 				return
-			this.reason := reason
 			this.status := 'rejected'
-			handle(this, 'onResolvedCallbacks')
-			if !handle(this, 'onRejectedCallbacks', reason)
-				SetTimer(this.throw := () => (this.DeleteProp('throw'), (Promise.onRejected)(reason)), -1)
+			SetTimer(task.Bind(this, this.reason := reason ?? Error(, -1), 0), this := -1)
 		}
-		static handle(this, name, val?) {
-			cbs := this.%name%
-			this.%name% := { Push: (*) => 0 }
-			if IsSet(val)
-				for fn in cbs
-					SetTimer(fn.Bind(val), -1)
-			return cbs.Length
+		static task(this, val, index := -1) {
+			cbs := this.DeleteProp('callbacks')
+			loop cbs.Length >> 1
+				cbs[index += 2](val)
+			else if !index && !this.handled
+				throw val
 		}
 	}
 	/**
@@ -66,20 +64,18 @@ class Promise {
 			throw TypeError('invalid onRejected')
 		if !HasMethod(onfulfilled, , 1)
 			throw TypeError('invalid onFulfilled')
+		this.handled := true
 		promise2 := { base: Promise.Prototype }
 		promise2.__New(executor)
 		return promise2
 		executor(resolve, reject) {
 			switch this.status {
-				case 'fulfilled':
-					task(promise2, resolve, reject, onfulfilled, this.value)
-				case 'rejected':
-					if hasthrow := this.DeleteProp('throw')
-						SetTimer(hasthrow, 0)
-					task(promise2, resolve, reject, onrejected, this.reason)
-				default:
-					this.onResolvedCallbacks.Push(task.Bind(promise2, resolve, reject, onfulfilled))
-					this.onRejectedCallbacks.Push(task.Bind(promise2, resolve, reject, onrejected))
+				case 'fulfilled': task(promise2, resolve, reject, onfulfilled, this.value)
+				case 'rejected': task(promise2, resolve, reject, onrejected, this.reason)
+				default: this.callbacks.Push(
+					task.Bind(promise2, resolve, reject, onfulfilled),
+					task.Bind(promise2, resolve, reject, onrejected)
+				)
 			}
 			static task(p2, resolve, reject, fn, val) {
 				try
@@ -88,7 +84,7 @@ class Promise {
 					reject(e)
 			}
 			static resolvePromise(p2, x, resolve, reject) {
-				if !HasMethod(x, 'then', 1)
+				if !(x is Promise)
 					return resolve(x)
 				if p2 == x
 					throw TypeError('Chaining cycle detected for promise #<Promise>')
@@ -117,18 +113,40 @@ class Promise {
 	 */
 	finally(onfinally) => this.then(
 		val => (onfinally(), val),
-		err => (onfinally(), (Promise.onRejected)(err)),
+		err => (onfinally(), (Promise.onRejected)(err))
 	)
 	/**
 	 * Waits for a promise to be completed.
+	 * @returns {T}
 	 */
-	await(timeout := 0) {
-		end := A_TickCount + timeout
-		while this.status == 'pending' && (!timeout || A_TickCount < end)
-			Sleep(-1)
-		if this.status == 'fulfilled'
+	await(timeout := -1) {
+		end := A_TickCount + timeout, this.handled := true, old := Critical(0)
+		while (pending := !ObjHasOwnProp(this, 'status')) && (timeout < 0 || A_TickCount < end)
+			Sleep(1)
+		Critical(old)
+		if !pending && this.status == 'fulfilled'
 			return this.value
-		throw this.status == 'pending' ? TimeoutError() : this.reason
+		throw pending ? TimeoutError() : this.reason
+	}
+	/**
+	 * Waits for a promise to be completed.
+	 * Wake up only when a system event or timeout occurs, which takes up less cpu time.
+	 * @returns {T}
+	 */
+	await2(timeout := -1) {
+		static hEvent := DllCall('CreateEvent', 'ptr', 0, 'int', 1, 'int', 0, 'ptr', 0, 'ptr')
+		static __del := { Ptr: hEvent, __Delete: this => DllCall('CloseHandle', 'ptr', this) }
+		static msg := Buffer(4 * A_PtrSize + 16)
+		t := A_TickCount, r := 258, this.handled := true, old := Critical(0)
+		while (pending := !ObjHasOwnProp(this, 'status')) && timeout &&
+			(DllCall('PeekMessage', 'ptr', msg, 'ptr', 0, 'uint', 0, 'uint', 0, 'uint', 0) ||
+				1 == r := DllCall('MsgWaitForMultipleObjects', 'uint', 1, 'ptr*', hEvent,
+					'int', 0, 'uint', timeout, 'uint', 7423, 'uint'))
+			Sleep(-1), (timeout < 0) || timeout := Max(timeout - A_TickCount + t, 0)
+		Critical(old)
+		if !pending && this.status == 'fulfilled'
+			return this.value
+		throw pending ? r == 0xffffffff ? OSError() : TimeoutError() : this.reason
 	}
 	static onRejected() {
 		throw this
@@ -148,8 +166,8 @@ class Promise {
 	/**
 	 * Creates a Promise that is resolved with an array of results when all of the provided Promises
 	 * resolve, or rejected when any Promise is rejected.
-	 * @param values An array of Promises.
-	 * @returns {Promise} A new Promise.
+	 * @param {Array<Promise>} values An array of Promises.
+	 * @returns {Promise<Array>} A new Promise.
 	 */
 	static all(values) {
 		return Promise(executor)
@@ -159,7 +177,7 @@ class Promise {
 				return resolve(res)
 			resolveRes := (index, data) => (res[index] := data, ++count == res.Length && resolve(res))
 			for val in values
-				if HasMethod(val, 'then', 1)
+				if val is Promise
 					val.then(resolveRes.Bind(A_Index), reject)
 				else resolveRes(A_Index, val)
 		}
@@ -167,8 +185,8 @@ class Promise {
 	/**
 	 * Creates a Promise that is resolved with an array of results when all
 	 * of the provided Promises resolve or reject.
-	 * @param values An array of Promises.
-	 * @returns A new Promise.
+	 * @param {Array<Promise>} values An array of Promises.
+	 * @returns {Promise<Array<{status: String, value?: Any, reason?: Any}>>} A new Promise.
 	 */
 	static allSettled(values) {
 		return Promise(executor)
@@ -179,7 +197,7 @@ class Promise {
 			resolveRes := (index, data) => (res[index] := { status: 'fulfilled', value: data }, ++count == res.Length && resolve(res))
 			rejectRes := (index, data) => (res[index] := { status: 'rejected', reason: data }, ++count == res.Length && resolve(res))
 			for val in values
-				if HasMethod(val, 'then', 1)
+				if val is Promise
 					val.then(resolveRes.Bind(A_Index), rejectRes.Bind(A_Index))
 				else resolveRes(A_Index, val)
 		}
@@ -187,14 +205,14 @@ class Promise {
 	/**
 	 * Creates a Promise that is resolved or rejected when any of the provided Promises are resolved
 	 * or rejected.
-	 * @param values An array of Promises.
+	 * @param {Array<Promise>} values An array of Promises.
 	 * @returns {Promise} A new Promise.
 	 */
 	static race(values) {
 		return Promise(executor)
 		executor(resolve, reject) {
 			for val in values
-				if HasMethod(val, 'then', 1)
+				if val is Promise
 					val.then(resolve, reject)
 				else return resolve(val)
 		}

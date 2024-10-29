@@ -496,7 +496,7 @@ class ctypes {
 		; Release the type cache when ahk exits,
 		; avoid some types that have circular references that cannot be released.
 		; But in ahk_l, this is not called.
-		(Array, Enumerator, MethodError, PropertyError)
+		(Array, Enumerator, MethodError, PropertyError, VarRef)
 		for tp in t := this.types.Get('', [])
 			try tp.__dispose()
 		for n, tp in this.types
