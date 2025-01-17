@@ -2,19 +2,19 @@
  * @description Create a child process, and read stdout/stderr
  * asynchronously, supporting multiple stdin inputs.
  * @author thqby
- * @date 2024/09/29
- * @version 2.0.1
+ * @date 2025/01/02
+ * @version 2.0.4
  ***********************************************************************/
 
 class child_process {
 	/** @type {Integer} */
-	pid := 0
+	static Prototype.pid := 0
 	/** @type {Integer} */
-	hProcess := 0
-	/** @type {File} */
-	stdin := 0
-	/** @type {child_process.AsyncPipeReader} */
-	stdout := 0, stderr := 0
+	static Prototype.hProcess := 0
+	/** @type {File|unset} */
+	static Prototype.stdin := 0
+	/** @type {child_process.AsyncPipeReader|unset} */
+	static Prototype.stdout := 0, Prototype.stderr := 0
 
 	/**
 	 * create a child process, then capture the stdout/stderr outputs.
@@ -23,6 +23,9 @@ class child_process {
 	 * @param {Object} [options] The object or map with optional property.
 	 * @param {String} [options.cwd] Current working directory of the child process.
 	 * @param {String} [options.input] The value is passed through stdin to the child process, and stdin is then closed.
+	 * @param {Integer} [options.stdin] The stdin handle passed to child process.
+	 * @param {Integer} [options.stdout] The stdout handle passed to child process.
+	 * @param {Integer|'stdout'} [options.stderr] The stderr handle passed to child process.
 	 * @param {String|Array<String>} [options.encoding='cp0'] The encoding(s) of stdin/stdout/stderr.
 	 * @param {Integer} [options.hide=true] Hide the subprocess window that would normally be created on Windows systems.
 	 * @param {Integer} [options.flags] The defval equal to `DllCall('GetPriorityClass', 'ptr', -1, 'uint')`,
@@ -30,36 +33,32 @@ class child_process {
 	 * 
 	 * @example <caption>Wait for the subprocess to exit and read stdout.</caption>
 	 * ping := child_process('ping -n 1 autohotkey.com')
-	 * ping.Wait()
-	 * MsgBox(ping.stdout.Read())
+	 * ping.wait()
+	 * MsgBox(ping.stdout.read())
 	 * 
 	 * @example <caption>Read and write stdout/stdin many times</caption>
-	 * cmd := child_process('cmd.exe')
+	 * cmd := child_process('cmd.exe',, { encoding: DllCall('GetOEMCP') })
 	 * stdin := cmd.stdin, stdout := cmd.stdout, stdout.complete := false
 	 * stdout.onData := (this, str) => RegExMatch(str, '(^|`n)(\s*\w:[^>]*>)$', &m) ?
-	 * 	this.Append(SubStr(str, this.complete := 1, -m.Len[2])) : this.Append(str)
+	 * 	this.append(SubStr(str, this.complete := 1, -m.Len[2])) : this.append(str)
 	 * write_and_read(cmd := '') {
-	 * 	(cmd && stdin.Write(cmd), stdin.Read(0))
+	 * 	(cmd && stdin.Write(cmd), stdin.read(0))
 	 * 	while !stdout.complete
 	 * 		Sleep(10)
-	 * 	MsgBox(stdout.Read()), stdout.complete := false
+	 * 	MsgBox(stdout.read()), stdout.complete := false
 	 * }
 	 * write_and_read(), write_and_read('dir c:\`n')
 	 * write_and_read('ping -n 1 autohotkey.com`n')
-	 * cmd.Terminate()
+	 * cmd.terminate()
 	 */
 	__New(command, args?, options?) {
+		local input, stderr, stdin, stdout := unset
 		hide := true, flags := DllCall('GetPriorityClass', 'ptr', -1, 'uint')
-		encoding := encoding_in := encoding_out := encoding_err := 'cp0'
-		input := unset, cwd := params := ''
+		encoding := 'cp0', cwd := params := ''
 		if IsSet(options)
 			for k, v in options.OwnProps()
-				%k% := v
-		flags |= hide ? 0x08000000 : 0
-		if encoding is Array {
-			for i, v in ['in', 'out', 'err']
-				encoding.Has(i) ? encoding_%v% := encoding[i] : 0
-		} else encoding_in := encoding_out := encoding_err := encoding
+				InStr('input,stdin,stdout,stderr,flags,encoding,cwd,hide', k) && %k% := v
+		ge := encoding is Array ? (e, i) => e.Has(i) ? e[i] : 'cp0' : (e, i) => e
 		if IsSet(args) {
 			if args is Array {
 				for v in args
@@ -68,42 +67,42 @@ class child_process {
 		} else if SubStr(command, 1, 1) = '"' || !FileExist(command)
 			params := command, command := ''
 
-		if !DllCall('CreatePipe', "ptr*", &stdinR := 0, "ptr*", &stdinW := 0, 'ptr', 0, 'uint', 0)
-			Throw OSError()
-		(handles := [stdinR]).__Delete := closehandles
-		this.stdin := FileOpen(stdinW, 'h', encoding_in)
 		static mFlags_offset := (VerCompare(A_AhkVersion, '2.1-alpha.3') >= 0 ? 6 : 4) * A_PtrSize + 8, USEHANDLE := 0x10000000
-		; remove USEHANDLE flag, auto close handle
-		NumPut('uint', NumGet(p := ObjPtr(this.stdin), mFlags_offset, 'uint') & ~USEHANDLE, p, mFlags_offset)
-		this.stdout := child_process.AsyncPipeReader('stdout', this, encoding_out)
-		this.stderr := child_process.AsyncPipeReader('stderr', this, encoding_err)
+		(handles := []).__Delete := closehandles
 
-		static x64 := A_PtrSize = 8
-		STARTUPINFO := Buffer(sz := x64 ? 104 : 68, 0)
-		PROCESS_INFORMATION := Buffer(x64 ? 24 : 16, 0)
-		NumPut('uint', sz, STARTUPINFO), NumPut('uint', 0x100, STARTUPINFO, x64 ? 60 : 44)
-		NumPut('ptr', stdinR, 'ptr', stdoutW := this.stdout.DeleteProp('hPipeW'), 'ptr',
-			stderrW := this.stderr.DeleteProp('hPipeW'), STARTUPINFO, sz - A_PtrSize * 3)
-		handles.Push(stdoutW, stderrW)
+		if !IsSet(stdin) {
+			if !DllCall('CreatePipe', "ptr*", &stdin := 0, "ptr*", &stdinW := 0, 'ptr', 0, 'uint', 0)
+				Throw OSError()
+			handles.Push(stdin), p := ObjPtr(this.stdin := FileOpen(stdinW, 'h', ge(encoding, 1)))
+			NumPut('uint', NumGet(p, mFlags_offset, 'uint') & ~USEHANDLE, p, mFlags_offset)
+		}
+		loop 2
+			IsSet(%k := A_Index == 1 ? 'stdout' : 'stderr'%) ||
+				handles.Push(%k% := (this.%k% := child_process.AsyncPipeReader(
+					k, this, ge(encoding, A_Index + 1))).DeleteProp('hPipeW'))
+		stderr := stderr = 'stdout' ? stdout : stderr
 		for h in handles
 			DllCall('SetHandleInformation', 'ptr', h, 'int', 1, 'int', 1)
 
+		static x64 := A_PtrSize = 8
+		si := Buffer(sz := x64 ? 104 : 68, 0), pi := Buffer(x64 ? 24 : 16, 0)
+		NumPut('uint', sz, si), NumPut('int64', 0x101 | !hide << 32, si, x64 ? 60 : 44)
+		NumPut('ptr', stdin, 'ptr', stdout, 'ptr', stderr, si, sz - A_PtrSize * 3)
 		if !DllCall('CreateProcess', 'ptr', command ? StrPtr(command) : 0, 'ptr', params ? StrPtr(params) : 0, 'ptr', 0, 'int', 0,
-			'int', true, 'int', flags, 'int', 0, 'ptr', cwd ? StrPtr(cwd) : 0, 'ptr', STARTUPINFO, 'ptr', PROCESS_INFORMATION)
+			'int', true, 'int', flags, 'int', 0, 'ptr', cwd ? StrPtr(cwd) : 0, 'ptr', si, 'ptr', pi)
 			Throw OSError()
-		handles.Push(NumGet(PROCESS_INFORMATION, A_PtrSize, 'ptr')), handles := 0
-		this.hProcess := NumGet(PROCESS_INFORMATION, 'ptr'), this.pid := NumGet(PROCESS_INFORMATION, 2 * A_PtrSize, 'uint')
+		handles.Push(NumGet(pi, A_PtrSize, 'ptr')), handles := 0
+		this.hProcess := NumGet(pi, 'ptr'), this.pid := NumGet(pi, 2 * A_PtrSize, 'uint')
+		if IsSet(input) && stdin := this.DeleteProp('stdin')
+			stdin.Write(input), stdin.Read(0)
 
-		if IsSet(input)
-			this.stdin.Write(input), this.stdin.Read(0), this.stdin := unset
-
-		closehandles(handles) {
+		static closehandles(handles) {
 			for h in handles
 				DllCall('CloseHandle', 'ptr', h)
 		}
-		escapeparam(s) {
+		static escapeparam(s) {
 			s := StrReplace(s, '"', '\"', , &c)
-			return c || RegExMatch(s, '\s') ? '"' s '"' : s
+			return c || RegExMatch(s, '[\s\v]') ? '"' RegexReplace(s, '(\\*)(?=(\\"|$))', '$1$1') '"' : s
 		}
 	}
 	__Delete() => this.hProcess && (DllCall('CloseHandle', 'ptr', this.hProcess), this.hProcess := 0)
@@ -111,7 +110,7 @@ class child_process {
 	 * wait process exit
 	 * @returns 0 (false) if the function timed out 
 	 */
-	Wait(timeout := -1) {
+	wait(timeout := -1) {
 		hProcess := this.hProcess, t := A_TickCount, r := 258, old := Critical(0)
 		while timeout && 1 == r := DllCall('MsgWaitForMultipleObjects', 'uint', 1, 'ptr*', hProcess, 'int', 0, 'uint', timeout, 'uint', 7423, 'uint')
 			(timeout == -1) || timeout := Max(timeout - A_TickCount + t, 0), Sleep(-1)
@@ -121,8 +120,8 @@ class child_process {
 		return r == 258 || !timeout ? 0 : 1
 	}
 	; terminate process
-	Terminate() => this.hProcess && DllCall('TerminateProcess', 'ptr', this.hProcess)
-	ExitCode => (DllCall('GetExitCodeProcess', 'ptr', this.hProcess, 'uint*', &code := 0), code)
+	terminate(exitCode := 0) => this.hProcess && DllCall('TerminateProcess', 'ptr', this.hProcess, 'uint', exitCode)
+	exitCode => (DllCall('GetExitCodeProcess', 'ptr', this.hProcess, 'uint*', &code := 0), code)
 
 	class AsyncPipeReader {
 		/** @event onData */
@@ -130,40 +129,26 @@ class child_process {
 		/** @event onClose */
 		static Prototype.onClose := (this) => 0
 		static Prototype.data := ''
-		__New(name, process, codepage := 0) {
-			if -1 == this.Ptr := DllCall('CreateNamedPipe', 'str', pn := '\\.\pipe\' name ObjPtr(this), 'uint', 0x40000001,
+		__New(name, process, encoding := 0) {
+			static bufsize := 16 * 1024
+			root := ObjPtr(this), process := ObjPtr(process)
+			if -1 == this.Ptr := DllCall('CreateNamedPipe', 'str', pn := '\\.\pipe\' name process, 'uint', 0x40000001,
 				'uint', 0, 'uint', 1, 'uint', 0, 'uint', 0, 'uint', 0, 'ptr', 0, 'ptr')
 				Throw OSError()
-			OVERLAPPED.EnableIoCompletionCallback(this)
-			root := ObjPtr(this), process := ObjPtr(process), ol := OVERLAPPED(onConnect)
+			OVERLAPPED.EnableIoCompletionCallback(this), ol := OVERLAPPED(onConnect)
 			err := !DllCall('ConnectNamedPipe', 'ptr', this, 'ptr', this._overlapped := ol) && A_LastError
 			if err && err != 997
 				Throw OSError()
-			this.name := name
+			this.name := name, emit := buf := 0
 			this.hPipeW := DllCall('CreateFile', 'str', pn, 'uint', 0x40000000,
 				'uint', 0, 'ptr', 0, 'uint', 0x3, 'uint', 0x40000080, 'ptr', 0, 'ptr')
 			this.DefineProp('process', { get: (*) => ObjFromPtrAddRef(process) })
-
+				.DefineProp('setEncoding', { call: setEncoding }), setEncoding(this, encoding)
 			onConnect(ol, err, *) {
-				static bufsize := 16 * 1024
 				local apr := ObjFromPtrAddRef(root)
 				if !err {
-					(buf := Buffer(16 + bufsize)).used := 0, ol.Call := onRead
-					switch codepage, false {
-						case -1:
-							emit := emit_buf
-							apr.DefineProp('Append', { call: append_buf })
-								.DefineProp('Read', { call: this => (v := this.data, this.data := Buffer(), v) })
-								.data := Buffer()
-						case 1600, 'utf-16': emit := emit_str.Bind(utf16Reader)
-						case 'utf-8': emit := emit_str.Bind(MultiByteReader(65001))
-						default:
-							if SubStr(codepage, 1, 2) = 'cp'
-								codepage := Integer(SubStr(codepage, 3))
-							emit := emit_str.Bind(MultiByteReader(codepage || DllCall('GetACP', 'uint')))
-					}
-					err := !DllCall('ReadFile', 'ptr', apr, 'ptr', buf,
-						'uint', bufsize, 'ptr', 0, 'ptr', ol) && A_LastError
+					buf := Buffer(bufsize), ol.Call := onRead
+					err := !DllCall('ReadFile', 'ptr', apr, 'ptr', buf, 'uint', bufsize, 'ptr', 0, 'ptr', ol) && A_LastError
 				}
 				switch err {
 					case 997, 0xC0000120, 0:	; ERROR_IO_PENDING, STATUS_CANCELLED
@@ -171,62 +156,50 @@ class child_process {
 						emit_close(apr)
 					default: Throw OSError(err)
 				}
-				onRead(ol, err, byte) {
-					local apr := ObjFromPtrAddRef(root)
-					if !err {
-						emit(apr, buf, byte + buf.used)
-						err := !DllCall('ReadFile', 'ptr', apr, 'ptr', buf.Ptr + buf.used,
-							'uint', bufsize, 'ptr', 0, 'ptr', ol) && A_LastError
-					}
-					switch err {
-						case 997, 0xC0000120, 0:
-						case 109, 0xC000014B:
-							emit_close(apr)
-						default: Throw OSError(err)
-					}
+			}
+			onRead(ol, err, byte) {
+				local apr := ObjFromPtrAddRef(root)
+				if !err {
+					emit(apr, buf, byte)
+					err := !DllCall('ReadFile', 'ptr', apr, 'ptr', buf, 'uint', bufsize, 'ptr', 0, 'ptr', ol) && A_LastError
+				}
+				switch err {
+					case 997, 0xC0000120, 0:
+					case 109, 0xC000014B:
+						emit_close(apr)
+					default: Throw OSError(err)
+				}
+			}
+			setEncoding(apr, encoding) {
+				if encoding == -1 {
+					apr.DefineProp('Append', { call: append_buf })
+						.DefineProp('Read', { call: this => (v := this.data, this.data := Buffer(), v) })
+						.data := Buffer(), emit := emit_buf
+				} else {
+					emit := emit_str.Bind(TextStreamDecoder(encoding || DllCall('GetACP')))
+					for k in ['data', 'Read', 'Append']
+						apr.DeleteProp(k)
 				}
 			}
 			static emit_close(apr) => (apr.onClose(), apr.DeleteProp('onClose'), apr.DeleteProp('onData'), apr.__Delete())
 			static emit_buf(apr, buf, byte) => apr.onData({ Ptr: buf.Ptr, Size: byte })
-			static emit_str(reader, apr, buf, byte) => apr.onData(reader(buf, byte + buf.used))
+			static emit_str(decoder, apr, buf, byte) => apr.onData(decoder({ Ptr: buf.Ptr, Size: byte }))
 			static append_buf(apr, buf) {
 				data := apr.data, used := data.Size, data.Size += sz := buf.Size
 				DllCall('RtlMoveMemory', 'ptr', buf, 'ptr', data.Ptr + used, 'uptr', sz)
-			}
-			static utf16Reader(buf, size) {
-				str := StrGet(buf, size & 0xfffffffe, 'utf-16')
-				(buf.used := size & 1) && NumPut('char', NumGet(buf, size - 1, 'char'), buf)
-				return str
-			}
-			static MultiByteReader(codepage) {
-				if !DllCall('GetCPInfo', 'uint', codepage, 'ptr', info := Buffer(18))
-					Throw OSError()
-				MaxCharSize := NumGet(info, 'uint')
-				return reader
-				reader(buf, size) {
-					lpbyte := buf.Ptr
-					if !l := DllCall('MultiByteToWideChar', 'uint', codepage, 'uint', 0, 'ptr', lpbyte, 'int', size, 'ptr', 0, 'int', 0, 'int')
-						return ''
-					VarSetStrCapacity(&str, l)
-					DllCall('MultiByteToWideChar', 'uint', codepage, 'uint', 0, 'ptr', lpbyte, 'int', size, 'ptr', p := StrPtr(str), 'int', l, 'int')
-					if (NumGet(p, (--l) <<= 1, 'ushort') == 0xfffd &&
-						!DllCall('MultiByteToWideChar', 'uint', codepage, 'uint', 8, 'ptr', lpbyte, 'int', size, 'ptr', 0, 'int', 0, 'int') &&
-						size - MaxCharSize < (n := DllCall('WideCharToMultiByte', 'uint', codepage, 'uint', 0, 'ptr', p, 'int', l >> 1, 'ptr', 0, 'int', 0, 'ptr', 0, 'ptr', 0)) &&
-						buf.used := size - n)
-						NumPut('int64', NumGet(lpbyte, n, 'int64'), lpbyte)
-					else buf.used := 0, l += 2
-					NumPut('short', 0, p + l)
-					VarSetStrCapacity(&str, -1)
-					return str
-				}
 			}
 		}
 		__Delete() {
 			if this.Ptr == -1
 				return
-			r := DllCall('CancelIoEx', 'ptr', this, 'ptr', 0)
-			DllCall('CloseHandle', 'ptr', this), r && Sleep(200)
+			this._overlapped.SafeDelete(this)
+			DllCall('CloseHandle', 'ptr', this)
 			this.Ptr := -1
+		}
+
+		; Default behavior when the onData callback function is not set, append data to the cache.
+		append(data) {
+			this.data .= data
 		}
 
 		isClosed => this.Ptr == -1
@@ -238,12 +211,10 @@ class child_process {
 		 * Read the cached data and clear the cache.
 		 * @returns {Buffer|String}
 		 */
-		Read() => this.DeleteProp('data')
+		read() => this.DeleteProp('data')
 
-		; Default behavior when the onData callback function is not set, append data to the cache.
-		Append(data) {
-			this.data .= data
-		}
+		setEncoding(encoding) => 0
 	}
 }
 #Include <OVERLAPPED>
+#Include <TextStreamDecoder>

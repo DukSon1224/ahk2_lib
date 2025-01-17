@@ -1,15 +1,14 @@
 /************************************************************************
  * @description Use Microsoft Edge WebView2 control in ahk.
  * @author thqby
- * @date 2024/10/24
- * @version 2.0.2
- * @webview2version 1.0.2849.39
+ * @date 2025/01/09
+ * @version 2.0.4
+ * @webview2version 1.0.2903.40
  * @see {@link https://www.nuget.org/packages/Microsoft.Web.WebView2/ nuget package}
  * @see {@link https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/ API Reference}
  ***********************************************************************/
 class WebView2 {
-	/** @deprecated */
-	static create(hwnd, callback := unset, createdEnvironment := 0, dataDir := '', edgeRuntime := '', options := 0, dllPath := 'WebView2Loader.dll') {
+	static create(hwnd := -3, callback?, createdEnvironment := 0, dataDir := '', edgeRuntime := '', options := 0, dllPath := 'WebView2Loader.dll') {
 		p := createdEnvironment ? createdEnvironment.CreateCoreWebView2ControllerAsync(hwnd) :
 			this.CreateControllerAsync(hwnd, options, dataDir, edgeRuntime, dllPath)
 		if !IsSet(callback)
@@ -25,7 +24,7 @@ class WebView2 {
 	 * @param {$FilePath} dllPath The path of `WebView2Loader.dll`.
 	 * @returns {Promise<WebView2.Controller>}
 	 */
-	static CreateControllerAsync(hwnd, options := 0, dataDir := '', edgeRuntime := '', dllPath := 'WebView2Loader.dll') {
+	static CreateControllerAsync(hwnd := -3, options := 0, dataDir := '', edgeRuntime := '', dllPath := 'WebView2Loader.dll') {
 		return this.CreateEnvironmentAsync(options, dataDir, edgeRuntime, dllPath)
 			.then(r => r.CreateCoreWebView2ControllerAsync(hwnd))
 	}
@@ -60,17 +59,6 @@ class WebView2 {
 	}
 
 	/**
-	 * @param {Integer | Buffer} ptr
-	 * @param {Integer} size
-	 * @returns {WebView2.Stream}
-	 */
-	static CreateMemStream(ptr := 0, size := 0) {
-		(s := this.Stream()).Ptr := DllCall('shlwapi\SHCreateMemStream', 'ptr', ptr,
-			'uint', size || ptr && ptr.Size, 'ptr')
-		return s
-	}
-
-	/**
 	 * @param {$FilePath} filePath
 	 * @param {'r'|'w'|'rw'} mode
 	 * - `r`, read-only mode, fails if the file doesn't exist.
@@ -83,6 +71,29 @@ class WebView2 {
 			InStr(mode, 'w') && (!InStr(mode, 'r') || !FileExist(filePath) ? 0x1002 : 2),
 			'uint', 128, 'int', 0, 'ptr', 0, 'ptr*', s := this.Stream(), 'hresult')
 		return s
+	}
+
+	/**
+	 * @param {Integer | Buffer} ptr
+	 * @param {Integer} size
+	 * @returns {WebView2.Stream}
+	 */
+	static CreateMemStream(ptr := 0, size := 0) {
+		(s := this.Stream()).Ptr := DllCall('shlwapi\SHCreateMemStream', 'ptr', ptr,
+			'uint', size || ptr && ptr.Size, 'ptr')
+		return s
+	}
+
+	/**
+	 * @param {String} text
+	 * @param {String} encoding
+	 * @returns {WebView2.Stream}
+	 */
+	static CreateTextStream(text, encoding := 'utf-8') {
+		if encoding = 'utf-16'
+			return this.CreateMemStream(StrPtr(text), StrLen(text) << 1)
+		StrPut(text, buf := Buffer(StrPut(text, encoding) - 1), encoding)
+		return this.CreateMemStream(buf)
 	}
 
 	/**
@@ -121,28 +132,6 @@ class WebView2 {
 		}
 	}
 
-	static AHKObjHelper() {
-		return { get: get, set: set, call: call }
-
-		get(this, prop, params := unset) {
-			if !IsSet(params) {
-				if (this is Array && prop is Integer) || (this is Map)
-					return this[prop]
-				params := []
-			}
-			return this.%prop%[params*]
-		}
-		set(this, prop, value, params := unset) {
-			if !IsSet(params) {
-				if (this is Array && prop is Integer) || (this is Map)
-					return this[prop] := value
-				params := []
-			}
-			return this.%prop%[params*] := value
-		}
-		call(this, method, params*) => this.%method%(params*)
-	}
-
 	; Interfaces Base class
 	class Base {
 		static Prototype.Ptr := 0
@@ -159,7 +148,8 @@ class WebView2 {
 					if !ptr
 						return
 					obj := ComObjQuery(ptr, Value)
-					ObjRelease(ptr), ObjAddRef(ptr := ComObjValue(obj))
+					if ptr !== nptr := ComObjValue(obj)
+						ObjRelease(ptr), ObjAddRef(ptr := nptr)
 					this.DefineProp('Ptr', { value: ptr })
 				}
 			}
@@ -188,9 +178,25 @@ class WebView2 {
 		__New(ptr := 0) => ptr && (ObjAddRef(ptr), this.Ptr := ptr)
 		__Delete() => (ptr := this.ptr) && ObjRelease(ptr)
 		__Call(Name, Params) {
+			if HasMethod(this, Name 'Async')
+				return this.%Name%Async(Params*).await()
 			if HasMethod(this, 'add_' Name)
 				return { ptr: this.ptr, __Delete: this.remove_%Name%.Bind(, this.add_%Name%(Params[1])) }
 			throw MethodError('This value of type "' this.__Class '" has no method named "' Name '".', -1)
+		}
+		/**
+		 * Convert the object to another interface.
+		 * @param {Class} cls A subclass of WebView2.base
+		 * @param {String} iid
+		 */
+		as(cls, iid?) {
+			ptr := ComObjValue(obj := ComObjQuery(this, iid ?? cls.IID))
+			if ptr == this.Ptr
+				ObjSetBase(this, cls.Prototype)
+			else if this is cls
+				ObjRelease(this.Ptr), ObjAddRef(this.Ptr := ptr)
+			else return cls(ptr)
+			return this
 		}
 		/**
 		 * By default, an object in webview2 can be encapsulated as multiple different ahk objects,
@@ -521,7 +527,103 @@ class WebView2 {
 	}
 	class Core extends WebView2.Base {
 		static IID := '{76eceacb-0462-4d94-ac83-423a6793775e}'
-		AddAHKObjHelper() => this.AddHostObjectToScript('AHKObjHelper', WebView2.AHKObjHelper())
+		/**
+		 * - Add global variable `ahk = chrome.webview.hostObjects`.
+		 * - Add `call(method='call',...args)` method for `KnownRemoteProxy` objects.
+		 * - Add `get(prop='__Item',...args)` method for `KnownRemoteProxy` objects.
+		 * - Add `set(prop='__Item',...args,val)` method for `KnownRemoteProxy` objects.
+		 * - Add `then` method for `KnownRemoteProxy` objects.
+		 * #### Compared with the original invoking method
+		 * ```javascript
+		 * let asyncArr = await ahk.arrayObj, syncArr = ahk.sync.arrayObj
+		 * // call obj's method
+		 * await asyncArr.call('Push',1,2,3)	// new
+		 * await asyncArr.Push(asyncArr,1,2,3)	// original
+		 * // get obj's non-existent property
+		 * syncArr.get('non_existent')	// new, undefined
+		 * syncArr.non_existent		// original, Proxy(function)
+		 * // get obj's property without params
+		 * syncArr.get('Length')	// new
+		 * syncArr.Length		// original
+		 * // set obj's property without params
+		 * syncArr.set('Length',2)	// new
+		 * syncArr.Length = 2	// original
+		 * // get obj's dynamic property with params
+		 * syncArr.get(null,2)	// new
+		 * syncArr.GetOwnPropDesc(syncArr.Base,'__Item').Get(syncArr,2)	// original
+		 * // set obj's dynamic property with params
+		 * syncArr.set(null,2,0)	// new
+		 * syncArr.GetOwnPropDesc(syncArr.Base,'__Item').Set(syncArr,0,2)	// original
+		 * // await ahk's promise
+		 * let p = ahk.promiseObj
+		 * await p	// new
+		 * await new Promise((resolve,reject) => p.Then(p,resolve,reject))	// original
+		 * ```
+		 */
+		InjectAhkComponent() {
+			static _ := !Promise.Prototype.DefineProp('then', {
+				call: (this, resolve, reject) => !this.onSettled(resolve, err => reject(IsObject(err) ? err.Message : err)) })
+			script := '
+			(
+			(function () {
+				const { objectSerializer: OS, remoteMessenger: RM, remoteRefTracker: RRT } = (window.ahk = chrome.webview.hostObjects)._options;
+				if (Object.hasOwn(OS, 'createKnownRemoteProxy'))
+					return;
+				const ahk_fns = ['call', 'get', 'set'];
+				const { _serializationOptionsPropertyName: SOPN, createKnownRemoteProxy: CKRP } = OS;
+				ahk._options.forceLocalProperties.push(...ahk_fns);
+				OS.createKnownRemoteProxy = function (objId, thenable, sync, debugId, basis, hostKeyNames) {
+					const proxy = CKRP.call(OS, objId, thenable, sync, debugId, basis, hostKeyNames);
+					if (!basis && objId) {
+						for (const k of ahk_fns) proxy.setLocalProperty(k, invoke.bind(proxy, k === 'call' ? 'apply' : k))
+						thenable || proxy.setLocalProperty('then', then.bind(proxy));
+					}
+					return proxy;
+				};
+				function then(onfulfilled, onrejected) {
+					return new Promise(async (resolve, reject) => {
+						let thenable = this._debugId.at(-1) !== '\x05then()';
+						try { thenable && await invoke.call(this, 'apply', '\x05then', resolve, err => reject(new Error(err))); }
+						catch { thenable = false; }
+						thenable || (delete this.then, resolve(this));
+					}).then(onfulfilled, onrejected);
+				}
+				function invoke(operation, methodName, ...parameters) {
+					const debugId = this._debugId.concat(operation === 'apply' ? (methodName ??= '') + '()' : methodName ||= '__item');
+					if (!Object.hasOwn(this, '_resultObjectId')) {
+						const promise = RM.postRequestMessage(this._remoteObjectId, methodName, operation, parameters);
+						const resolve = getResult.bind(null, false, promise._callId, operation, debugId);
+						return promise.then(resolve, resolve);
+					}
+					const callId = RM._idGenerator.getNextId();
+					return getResult(true, operation, callId, debugId, RM._postRemoteProxyMessage(this._resultObjectId, methodName, {
+						kind: "request", options: { operation, typedArrayIndices: RM.GetTypedArrayParametersIndices(parameters) }, parameters,
+					}, callId, true));
+				}
+				function getResult(sync, operation, callId, debugId, rawResult) {
+					const { error, has_object, result } = rawResult.parameters;
+					if (error !== undefined)
+						throw new Error(OS.deserialize(sync, false, debugId, error));
+					if (has_object && result.hasOwnProperty(SOPN)) {
+						if (operation === 'get') {
+							const options = result[SOPN];
+							if (options.seq_no && options.cache_able && options.groupId === 'native') {
+								RRT.addSequenceId(options.seq_no), RRT._releaseObjectsCallback(RRT._maxRemoteSequenceId, options.remoteObjectId);
+								delete OS._paramTracker[callId];
+								return undefined;
+							}
+						}
+						result.callId = callId;
+					}
+					const val = OS.deserialize(false, has_object, debugId, result);
+					delete OS._paramTracker[callId];
+					return val;
+				}
+			})();
+			)'
+			this.ExecuteScriptAsync(script)
+			return this.AddScriptToExecuteOnDocumentCreatedAsync(script)
+		}
 		Settings => (ComCall(3, this, 'ptr*', settings := WebView2.Settings()), settings)
 		Source => (ComCall(4, this, 'ptr*', &uri := 0), CoTaskMem_String(uri))
 		Navigate(uri) => ComCall(5, this, 'wstr', uri)
@@ -761,6 +863,11 @@ class WebView2 {
 		/** @param {(sender: WebView2.Core, args: WebView2.SaveFileSecurityCheckStartingEventArgs) => void} eventHandler */
 		add_SaveFileSecurityCheckStarting(eventHandler) => (ComCall(131, this, 'ptr', eventHandler, 'int64*', &token := 0), token)
 		remove_SaveFileSecurityCheckStarting(token) => ComCall(132, this, 'int64', token)
+
+		static IID_27 := '{00fbe33b-8c07-517c-aa23-0ddd4b5f6fa0}'
+		/** @param {(sender: WebView2.Core, args: WebView2.ScreenCaptureStartingEventArgs) => void} eventHandler */
+		add_ScreenCaptureStarting(eventHandler) => (ComCall(133, this, 'ptr', eventHandler, 'int64*', &token := 0), token)
+		remove_ScreenCaptureStarting(token) => ComCall(134, this, 'int64', token)
 	}
 	class ClientCertificate extends WebView2.Base {
 		static IID := '{e7188076-bcc3-11eb-8529-0242ac130003}'
@@ -1144,7 +1251,6 @@ class WebView2 {
 	}
 	class Frame extends WebView2.Base {
 		static IID := '{f1131a5e-9ba9-11eb-a8b3-0242ac130003}'
-		AddAHKObjHelper() => this.AddHostObjectToScriptWithOrigins('AHKObjHelper', WebView2.AHKObjHelper())
 		Name => (ComCall(3, this, 'ptr*', &name := 0), CoTaskMem_String(name))
 		/** @param {(sender: WebView2.Frame, args: IUnknown) => void} eventHandler */
 		add_NameChanged(eventHandler) => (ComCall(4, this, 'ptr', eventHandler, 'int64*', &token := 0), token)	; ICoreWebView2FrameNameChangedEventHandler
@@ -1194,6 +1300,11 @@ class WebView2 {
 
 		static IID_5 := '{99d199c4-7305-11ee-b962-0242ac120002}'
 		FrameId => (ComCall(27, this, 'uint*', &id := 0), id)
+
+		static IID_6 := '{0de611fd-31e9-5ddc-9d71-95eda26eff32}'
+		/** @param {(sender: WebView2.Frame, args: WebView2.ScreenCaptureStartingEventArgs) => void} eventHandler */
+		add_ScreenCaptureStarting(eventHandler) => (ComCall(28, this, 'ptr', eventHandler, 'int64*', &token := 0), token)
+		remove_ScreenCaptureStarting(token) => ComCall(29, this, 'int64', token)
 	}
 	class FrameCreatedEventArgs extends WebView2.Base {
 		static IID := '{4d6e7b5e-9baa-11eb-a8b3-0242ac130003}'
@@ -1395,7 +1506,7 @@ class WebView2 {
 	class ObjectCollectionView extends WebView2.List {
 		static IID := '{0f36fd87-4f69-4415-98da-888f89fb9a33}'
 		Count => (ComCall(3, this, 'uint*', &value := 0), value)
-		GetValueAtIndex(index) => (ComCall(4, this, 'uint', index, 'ptr', value := ComValue(0xd, 0)), value)
+		GetValueAtIndex(index) => (ComCall(4, this, 'uint', index, 'ptr*', value := WebView2.Base()), value)
 	}
 	class PermissionRequestedEventArgs extends WebView2.Base {
 		static IID := '{973ae2ef-ff18-4894-8fb2-3c758f046810}'
@@ -1760,17 +1871,30 @@ class WebView2 {
 	class SaveFileSecurityCheckStartingEventArgs extends WebView2.Base {
 		static IID := '{cf4ff1d1-5a67-5660-8d63-ef699881ea65}'
 		CancelSave {
-			get => (ComCall(4, this, 'int*', &value := 0), value)
-			set => ComCall(5, this, 'int', Value)
+			get => (ComCall(3, this, 'int*', &value := 0), value)
+			set => ComCall(4, this, 'int', Value)
 		}
-		DocumentOriginUri => (ComCall(6, this, 'ptr*', &value := 0), CoTaskMem_String(value))
-		FileExtension => (ComCall(7, this, 'ptr*', &value := 0), CoTaskMem_String(value))
-		FilePath => (ComCall(8, this, 'ptr*', &value := 0), CoTaskMem_String(value))
+		DocumentOriginUri => (ComCall(5, this, 'ptr*', &value := 0), CoTaskMem_String(value))
+		FileExtension => (ComCall(6, this, 'ptr*', &value := 0), CoTaskMem_String(value))
+		FilePath => (ComCall(7, this, 'ptr*', &value := 0), CoTaskMem_String(value))
 		SuppressDefaultPolicy {
-			get => (ComCall(9, this, 'int*', &value := 0), value)
-			set => ComCall(10, this, 'int', Value)
+			get => (ComCall(8, this, 'int*', &value := 0), value)
+			set => ComCall(9, this, 'int', Value)
 		}
-		GetDeferral() => (ComCall(11, this, 'ptr*', deferral := WebView2.Deferral()), deferral)
+		GetDeferral() => (ComCall(10, this, 'ptr*', deferral := WebView2.Deferral()), deferral)
+	}
+	class ScreenCaptureStartingEventArgs extends WebView2.Base {
+		static IID := '{892c03fd-aee3-5eba-a1fa-6fd2f6484b2b}'
+		Cancel {
+			get => (ComCall(3, this, 'int*', &value := 0), value)
+			set => ComCall(4, this, 'int', Value)
+		}
+		Handled {
+			get => (ComCall(5, this, 'int*', &value := 0), value)
+			set => ComCall(6, this, 'int', Value)
+		}
+		OriginalSourceFrameInfo => (ComCall(7, this, 'ptr*', value := WebView2.FrameInfo()), value)
+		GetDeferral() => (ComCall(8, this, 'ptr*', value := WebView2.Deferral()), value)
 	}
 	class ScriptDialogOpeningEventArgs extends WebView2.Base {
 		static IID := '{7390bb70-abe0-4843-9529-f143b31b03d6}'
@@ -1915,7 +2039,7 @@ class WebView2 {
 			DllCall('shlwapi\IStream_Read', 'ptr', this, 'ptr', buf := Buffer(sz), 'uint', sz)
 			return buf
 		}
-		ToString() => StrGet(this.ToBuffer(), 'utf-8')
+		ToString(encoding := 'utf-8') => StrGet(this.ToBuffer(), encoding)
 	}
 	class StringCollection extends WebView2.List {
 		static IID := '{f41f3f8a-bcc3-11eb-8529-0242ac130003}'
@@ -2077,7 +2201,7 @@ class WebView2 {
 	static MOUSE_EVENT_VIRTUAL_KEYS := { NONE: 0, LEFT_BUTTON: 0x1, RIGHT_BUTTON: 0x2, SHIFT: 0x4, CONTROL: 0x8, MIDDLE_BUTTON: 0x10, X_BUTTON1: 0x20, X_BUTTON2: 0x40 }
 	static MOVE_FOCUS_REASON := { PROGRAMMATIC: 0, NEXT: 1, PREVIOUS: 2 }
 	static NAVIGATION_KIND := { RELOAD: 0, BACK_OR_FORWARD: 1, NEW_DOCUMENT: 2 }
-	static NON_CLIENT_REGION_KIND := { NOWHERE: 0, CLIENT: 1, CAPTION: 2 }
+	static NON_CLIENT_REGION_KIND := { NOWHERE: 0, CLIENT: 1, CAPTION: 2, MINIMIZE: 8, MAXIMIZE: 9, LOSE: 20 }
 	static PDF_TOOLBAR_ITEMS := { ITEMS_NONE: 0, ITEMS_SAVE: 0x1, ITEMS_PRINT: 0x2, ITEMS_SAVE_AS: 0x4, ITEMS_ZOOM_IN: 0x8, ITEMS_ZOOM_OUT: 0x10, ITEMS_ROTATE: 0x20, ITEMS_FIT_PAGE: 0x40, ITEMS_PAGE_LAYOUT: 0x80, ITEMS_BOOKMARKS: 0x100, ITEMS_PAGE_SELECTOR: 0x200, ITEMS_SEARCH: 0x400, ITEMS_FULL_SCREEN: 0x800, ITEMS_MORE_SETTINGS: 0x1000 }
 	static PERMISSION_KIND := { UNKNOWN_PERMISSION: 0, MICROPHONE: 1, CAMERA: 2, GEOLOCATION: 3, NOTIFICATIONS: 4, OTHER_SENSORS: 5, CLIPBOARD_READ: 6, MULTIPLE_AUTOMATIC_DOWNLOADS: 7, FILE_READ_WRITE: 8, AUTOPLAY: 9, LOCAL_FONTS: 10, MIDI_SYSTEM_EXCLUSIVE_MESSAGES: 11, WINDOW_MANAGEMENT: 12 }
 	static PERMISSION_STATE := { DEFAULT: 0, ALLOW: 1, DENY: 2 }
